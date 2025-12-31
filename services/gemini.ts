@@ -85,7 +85,6 @@ RETURN ONLY VALID JSON.`,
           };
         });
     } catch (error: any) {
-      console.log("Gemini API Key Loaded:", !!process.env.API_KEY);
 
       console.error("Gemini Audit Error:", error);
       if (error.message?.includes("SAFETY")) {
