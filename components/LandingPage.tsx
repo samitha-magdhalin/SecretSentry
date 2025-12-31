@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { SecretFinding, Severity } from '../types';
 
@@ -14,6 +13,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onLogin, onAdHocScan }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [results, setResults] = useState<SecretFinding[]>([]);
   const [hasScanned, setHasScanned] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,12 +26,14 @@ const LandingPage: React.FC<LandingPageProps> = ({ onLogin, onAdHocScan }) => {
     if (!sandboxCode.trim()) return;
     setIsAnalyzing(true);
     setHasScanned(false);
+    setScanError(null);
     try {
       const findings = await onAdHocScan(sandboxCode);
       setResults(findings);
       setHasScanned(true);
     } catch (err) {
       console.error(err);
+      setScanError(err instanceof Error ? err.message : "Failed to analyze code. Check your API key.");
     } finally {
       setIsAnalyzing(false);
     }
@@ -215,9 +217,19 @@ const LandingPage: React.FC<LandingPageProps> = ({ onLogin, onAdHocScan }) => {
           </div>
 
           {/* New Results Display */}
-          {hasScanned && (
+          {(hasScanned || scanError) && (
             <div className="p-12 lg:p-16 bg-black/40 border-t border-white/5 animate-slide-up">
-              {results.length > 0 ? (
+              {scanError ? (
+                <div className="p-8 bg-red-500/10 border border-red-500/30 rounded-2xl text-red-400">
+                   <div className="flex items-center space-x-3 mb-2">
+                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                     </svg>
+                     <p className="font-black uppercase tracking-widest text-xs">Analysis Failed</p>
+                   </div>
+                   <p className="text-sm font-medium">{scanError}</p>
+                </div>
+              ) : results.length > 0 ? (
                 <div className="space-y-12">
                   <div className="flex items-center space-x-4">
                     <div className="bg-red-500 p-2 rounded-lg">
