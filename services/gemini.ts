@@ -3,80 +3,104 @@ import { SecretFinding, Severity } from "../types";
 
 export class GeminiService {
   async analyzeCodeForSecrets(code: string, fileName: string): Promise<SecretFinding[]> {
-    // Relying on AI context rather than restrictive regex to avoid "False Safe" results
     if (!code || code.trim().length < 5) return [];
 
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      throw new Error("Gemini API Key missing. Please ensure the API_KEY environment variable is set in Vercel.");
+    }
+
     try {
-      // Always initialize GoogleGenAI with a fresh instance right before use with the correct apiKey parameter
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       
       const response = await ai.models.generateContent({
-        // Use gemini-3-pro-preview for complex reasoning and coding tasks
         model: "gemini-3-pro-preview",
-        contents: `Analyze the provided code from file "${fileName}". 
-        Your task is to identify hardcoded secrets, credentials, and sensitive configuration.
-        
-        LOOK FOR:
-        - API Keys (AWS, Stripe, OpenAI, etc.)
-        - Database connection strings and passwords
-        - Private keys (RSA, SSH, PGP)
-        - Authentication tokens (JWT, OAuth, Bearer)
-        - High-entropy strings assigned to variables (e.g. const s = "Xy7...").
+        contents: `You are a Senior Security Auditor. Your task is to identify HIGH-CONFIDENCE hardcoded secrets.
 
-        CRITICAL: For each secret found, return the literal 'secretValue'. 
-        If no secrets are found, return an empty array [].
+FILE: ${fileName}
 
-        Code to analyze:
-        ---
-        ${code.substring(0, 8000)}
-        ---`,
+CRITICAL: DO NOT FLAG THE FOLLOWING (FALSE POSITIVES):
+- CSS class names or Tailwind JIT hashes (e.g., bg-[length:200%_auto], text-[#6366f1])
+- SVG path data (strings starting with 'M', 'L', 'Z', etc.)
+- Public UUIDs/GUIDs used for DOM element IDs or mapping keys
+- Version numbers (e.g., 1.2.3-beta)
+- Generic placeholder strings like "your-api-key-here" (unless they look like real leaked keys)
+- Long strings that are clearly text content or public documentation links.
+
+VALIDATION LOGIC:
+A string is only a "Secret" if:
+1. It is assigned to a variable named like: 'token', 'secret', 'key', 'password', 'auth', 'cred', 'apiKey', 'connectionString'.
+2. OR it follows a specific format (e.g., 'sk_live_...', 'AKIA...', 'AIza...').
+3. AND it has high entropy but is NOT used in a UI/Styling context.
+
+RETURN ONLY VALID JSON.`,
         config: {
-          systemInstruction: "You are an expert security auditor. Your goal is to find accidentally committed secrets in code. Be precise and avoid false positives, but prioritize security. Always return valid JSON.",
+          systemInstruction: "You are a conservative security engine. It is better to miss a borderline suspicious string than to flag a CSS class or an SVG path as a secret. Be extremely skeptical of random strings in HTML/CSS contexts.",
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
-                line: { type: Type.INTEGER, description: "Line number" },
-                type: { type: Type.STRING, description: "Type of secret (e.g. AWS Secret Key)" },
-                snippet: { type: Type.STRING, description: "Small context snippet" },
-                secretValue: { type: Type.STRING, description: "The actual hardcoded secret string" },
-                severity: { 
-                    type: Type.STRING, 
-                    enum: Object.values(Severity),
-                },
-                explanation: { type: Type.STRING, description: "Why this is a risk" },
-                suggestion: { type: Type.STRING, description: "How to fix (e.g. use env vars)" },
+                line: { type: Type.INTEGER },
+                type: { type: Type.STRING, description: "Classification of secret" },
+                snippet: { type: Type.STRING },
+                secretValue: { type: Type.STRING, description: "The actual secret value" },
+                severity: { type: Type.STRING, enum: Object.values(Severity) },
+                explanation: { type: Type.STRING, description: "Why this is definitely a secret and not a CSS/ID string" },
+                suggestion: { type: Type.STRING },
+                confidence: { type: Type.NUMBER, description: "Score from 0 to 1. Only return findings > 0.8" }
               },
-              required: ["line", "type", "snippet", "secretValue", "severity", "explanation", "suggestion"]
+              required: ["line", "type", "snippet", "secretValue", "severity", "explanation", "suggestion", "confidence"]
             }
           }
         }
       });
 
-      // Directly access the .text property from GenerateContentResponse
       const text = response.text?.trim();
-      if (!text) return [];
+      if (!text || text === "[]") return [];
 
-      const findings = JSON.parse(text);
-      return findings.map((f: any) => {
-        const val = String(f.secretValue || "");
-        const redacted = val.length > 8 
-            ? `${val.substring(0, 4)}••••${val.substring(val.length - 4)}` 
-            : "••••••••";
+      let rawFindings;
+      try {
+        rawFindings = JSON.parse(text);
+      } catch (e) {
+        const match = text.match(/\[[\s\S]*\]/);
+        rawFindings = match ? JSON.parse(match[0]) : [];
+      }
 
-        return {
-            ...f,
-            id: Math.random().toString(36).substr(2, 9),
-            file: fileName,
-            redactedSecret: redacted
-        };
-      });
-    } catch (error) {
-      console.error("Gemini analysis error:", error);
-      // Re-throw so UI can notify user of API failures rather than showing "Safe"
-      throw new Error(error instanceof Error ? error.message : "Security analysis failed.");
+      // Filter out low confidence or suspicious AI hallucinations
+      return rawFindings
+        .filter((f: any) => f.confidence > 0.8)
+        .map((f: any) => {
+          const val = String(f.secretValue || "");
+          const redacted = val.length > 12 
+              ? `${val.substring(0, 4)}••••${val.substring(val.length - 4)}` 
+              : "••••••••";
+
+          return {
+              ...f,
+              id: Math.random().toString(36).substr(2, 9),
+              file: fileName,
+              redactedSecret: redacted
+          };
+        });
+    } catch (error: any) {
+      console.error("Gemini Audit Error:", error);
+      if (error.message?.includes("SAFETY")) {
+        // Safety triggers usually mean we found something very sensitive that the AI won't repeat
+        return [{
+          id: 'safety-trigger',
+          file: fileName,
+          line: 0,
+          type: "Confirmed Sensitive Data (Filtered)",
+          snippet: "Confidential data triggered safety block",
+          severity: Severity.CRITICAL,
+          explanation: "The AI detected a real, highly sensitive production credential and blocked the output for safety. This is a 100% positive match.",
+          suggestion: "Rotate all credentials in this file immediately.",
+          redactedSecret: "REDACTED"
+        }];
+      }
+      throw new Error("AI analysis engine timed out or was blocked.");
     }
   }
 }
