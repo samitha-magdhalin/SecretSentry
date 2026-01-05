@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { GitHubService } from './services/github';
 import { GeminiService } from './services/gemini';
@@ -27,17 +26,18 @@ const App: React.FC = () => {
     setToken(newToken);
   };
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     localStorage.removeItem('gh_token');
     setToken(null);
     setUser(null);
     setRepos([]);
     setActiveView('landing');
-  };
+  }, []);
 
   const fetchUserData = useCallback(async () => {
     if (!githubService) return;
     setLoading(true);
+    setError(null);
     try {
       const [userData, reposData] = await Promise.all([
         githubService.getUser(),
@@ -47,12 +47,20 @@ const App: React.FC = () => {
       setRepos(reposData);
       setActiveView('dashboard');
     } catch (err: any) {
-      setError(err.message);
-      handleLogout();
+      if (err.message.includes('GITHUB_INVALID_TOKEN')) {
+        setError("Your GitHub token is invalid. Please sign in with a valid token.");
+        handleLogout();
+      } else if (err.message.includes('GITHUB_RATE_LIMIT')) {
+        setError("GitHub rate limit exceeded. Please wait a few minutes before trying again.");
+        setActiveView('landing');
+      } else {
+        setError("Failed to connect to GitHub: " + err.message);
+        handleLogout();
+      }
     } finally {
       setLoading(false);
     }
-  }, [githubService]);
+  }, [githubService, handleLogout]);
 
   useEffect(() => {
     if (token) {
@@ -105,7 +113,10 @@ const App: React.FC = () => {
                 }
               }
               return results;
-            } catch (fileErr) {
+            } catch (fileErr: any) {
+              if (fileErr.message.includes('GITHUB_RATE_LIMIT')) {
+                throw fileErr; // Bubble up rate limit errors to stop the scan
+              }
               console.error(`Failed to process ${file.path}:`, fileErr);
               return [];
             } finally {
@@ -134,7 +145,14 @@ const App: React.FC = () => {
         peakMemoryMB: peakMemory ? Math.round(peakMemory / 1024 / 1024) : undefined
       });
     } catch (err: any) {
-      setError("Failed to scan: " + err.message);
+      let errorMessage = "Scan failed: " + err.message;
+      if (err.message.includes('GITHUB_RATE_LIMIT')) {
+        errorMessage = "Scan interrupted: GitHub rate limit exceeded. The scan could not be completed.";
+      } else if (err.message.includes('GITHUB_INVALID_TOKEN')) {
+        errorMessage = "Scan failed: Your GitHub session has expired. Please log in again.";
+        handleLogout();
+      }
+      setError(errorMessage);
       setActiveView('dashboard');
     }
   };
@@ -166,7 +184,11 @@ ${finding.suggestion}
       await githubService.createIssue(selectedRepo.full_name, title, body);
       alert("Successfully created GitHub issue!");
     } catch (err: any) {
-      alert("Failed to create issue: " + err.message);
+      if (err.message.includes('GITHUB_RATE_LIMIT')) {
+        alert("Failed to create issue: GitHub rate limit exceeded. Please try again later.");
+      } else {
+        alert("Failed to create issue: " + err.message);
+      }
     }
   };
 
@@ -191,9 +213,23 @@ ${finding.suggestion}
         )}
 
         {error && (
-          <div className="bg-red-500/10 border border-red-500/50 text-red-500 p-4 rounded-lg mb-8 flex justify-between items-center">
-            <span>{error}</span>
-            <button onClick={() => setError(null)} className="text-xl">&times;</button>
+          <div className="animate-slide-up bg-red-500/10 border border-red-500/50 text-red-500 p-6 rounded-2xl mb-8 flex justify-between items-center shadow-lg backdrop-blur-sm">
+            <div className="flex items-center space-x-4">
+              <div className="p-2 bg-red-500/20 rounded-lg">
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <span className="font-semibold">{error}</span>
+            </div>
+            <button 
+              onClick={() => setError(null)} 
+              className="p-2 hover:bg-red-500/20 rounded-full transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
           </div>
         )}
 

@@ -31,8 +31,9 @@ export class GeminiService {
       // MANDATORY: Create a new GoogleGenAI instance right before making an API call 
       // to ensure it always uses the most up-to-date API key from the environment.
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Fix: Updated model to 'gemini-3-pro-preview' for complex code analysis tasks as per developer guidelines.
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-3-pro-preview",
         contents: `Analyze the following code from file "${fileName}" and identify if any hardcoded secrets are present.
         
         CRITICAL: For each secret found, you MUST return the 'secretValue' which is the literal text of the secret string so it can be redacted.

@@ -1,4 +1,3 @@
-
 import { GithubRepo, GithubUser } from '../types';
 
 export class GitHubService {
@@ -19,8 +18,23 @@ export class GitHubService {
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || 'GitHub API request failed');
+      let errorMessage = 'GitHub API request failed';
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.message || errorMessage;
+      } catch (e) {
+        // Fallback if response is not JSON
+      }
+
+      if (response.status === 401) {
+        throw new Error('GITHUB_INVALID_TOKEN: Your GitHub token is invalid or has expired.');
+      }
+
+      if (response.status === 403 && errorMessage.toLowerCase().includes('rate limit')) {
+        throw new Error('GITHUB_RATE_LIMIT: You have exceeded the GitHub API rate limit. Please try again later.');
+      }
+
+      throw new Error(errorMessage);
     }
 
     return response.json();
@@ -95,6 +109,9 @@ export class GitHubService {
 
       return files;
     } catch (error) {
+      if (error.message.includes('GITHUB_RATE_LIMIT') || error.message.includes('GITHUB_INVALID_TOKEN')) {
+        throw error;
+      }
       return this.getAllFilesLegacy(fullName);
     }
   }
