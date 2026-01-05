@@ -1,5 +1,5 @@
 {
-  "name": "Copy of SecretSentry",
+  "name": "SecretSentry",
   "description": "An automated AI-powered security scanner for GitHub repositories that detects accidentally committed secrets like API keys and credentials before they are exploited.",
   "requestFramePermissions": []
 }

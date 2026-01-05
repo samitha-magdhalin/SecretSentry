@@ -1,107 +1,88 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { SecretFinding, Severity } from "../types";
 
+/**
+ * MANDATORY: The API key must be obtained exclusively from process.env.API_KEY.
+ * We declare it globally here to satisfy the TypeScript compiler during build.
+ */
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      // Added readonly modifier to align with vite-env.d.ts and avoid TypeScript declaration conflicts.
+      readonly API_KEY: string;
+    }
+  }
+}
+
 export class GeminiService {
   async analyzeCodeForSecrets(code: string, fileName: string): Promise<SecretFinding[]> {
-    if (!code || code.trim().length < 5) return [];
+    const patterns = [
+        /api[_-]?key/i, /password/i, /secret/i, /token/i, /access[_-]?key/i,
+        /sk-[a-zA-Z0-9]{48}/, 
+        /AIza[0-9A-Za-z-_]{35}/, 
+        /sq0atp-[0-9A-Za-z\-_]{22}/, 
+        /https:\/\/hooks\.slack\.com\/services\/T[0-9A-Z]{8}\/B[0-9A-Z]{8}\/[0-9A-Za-z]{24}/,
+    ];
 
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      throw new Error("Gemini API Key missing. Please ensure the API_KEY environment variable is set in Vercel.");
-    }
+    const hasSuspiciousContent = patterns.some(p => p.test(code));
+    if (!hasSuspiciousContent) return [];
 
     try {
-      const ai = new GoogleGenAI({ apiKey });
-      
+      // MANDATORY: Create a new GoogleGenAI instance right before making an API call 
+      // to ensure it always uses the most up-to-date API key from the environment.
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
-        model: "gemini-3-pro-preview",
-        contents: `You are a Senior Security Auditor. Your task is to identify HIGH-CONFIDENCE hardcoded secrets.
-
-FILE: ${fileName}
-
-CRITICAL: DO NOT FLAG THE FOLLOWING (FALSE POSITIVES):
-- CSS class names or Tailwind JIT hashes (e.g., bg-[length:200%_auto], text-[#6366f1])
-- SVG path data (strings starting with 'M', 'L', 'Z', etc.)
-- Public UUIDs/GUIDs used for DOM element IDs or mapping keys
-- Version numbers (e.g., 1.2.3-beta)
-- Generic placeholder strings like "your-api-key-here" (unless they look like real leaked keys)
-- Long strings that are clearly text content or public documentation links.
-
-VALIDATION LOGIC:
-A string is only a "Secret" if:
-1. It is assigned to a variable named like: 'token', 'secret', 'key', 'password', 'auth', 'cred', 'apiKey', 'connectionString'.
-2. OR it follows a specific format (e.g., 'sk_live_...', 'AKIA...', 'AIza...').
-3. AND it has high entropy but is NOT used in a UI/Styling context.
-
-RETURN ONLY VALID JSON.`,
+        model: "gemini-3-flash-preview",
+        contents: `Analyze the following code from file "${fileName}" and identify if any hardcoded secrets are present.
+        
+        CRITICAL: For each secret found, you MUST return the 'secretValue' which is the literal text of the secret string so it can be redacted.
+        
+        Return results as a JSON array.
+        Code:
+        \`\`\`
+        ${code.substring(0, 5000)}
+        \`\`\``,
         config: {
-          systemInstruction: "You are a conservative security engine. It is better to miss a borderline suspicious string than to flag a CSS class or an SVG path as a secret. Be extremely skeptical of random strings in HTML/CSS contexts.",
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
-                line: { type: Type.INTEGER },
-                type: { type: Type.STRING, description: "Classification of secret" },
-                snippet: { type: Type.STRING },
-                secretValue: { type: Type.STRING, description: "The actual secret value" },
-                severity: { type: Type.STRING, enum: Object.values(Severity) },
-                explanation: { type: Type.STRING, description: "Why this is definitely a secret and not a CSS/ID string" },
-                suggestion: { type: Type.STRING },
-                confidence: { type: Type.NUMBER, description: "Score from 0 to 1. Only return findings > 0.8" }
+                line: { type: Type.INTEGER, description: "Line number" },
+                type: { type: Type.STRING, description: "Type (e.g. AWS Key)" },
+                snippet: { type: Type.STRING, description: "Surrounding context snippet" },
+                secretValue: { type: Type.STRING, description: "The literal secret string found" },
+                severity: { 
+                    type: Type.STRING, 
+                    enum: Object.values(Severity),
+                },
+                explanation: { type: Type.STRING, description: "Detailed risk assessment" },
+                suggestion: { type: Type.STRING, description: "Remediation steps" },
               },
-              required: ["line", "type", "snippet", "secretValue", "severity", "explanation", "suggestion", "confidence"]
+              required: ["line", "type", "snippet", "secretValue", "severity", "explanation", "suggestion"]
             }
           }
         }
       });
 
-      const text = response.text?.trim();
-      if (!text || text === "[]") return [];
+      const findings = JSON.parse(response.text || "[]");
+      return findings.map((f: any) => {
+        const val = f.secretValue || "";
+        const redacted = val.length > 8 
+            ? `${val.substring(0, 4)}••••${val.substring(val.length - 4)}` 
+            : "••••••••";
 
-      let rawFindings;
-      try {
-        rawFindings = JSON.parse(text);
-      } catch (e) {
-        const match = text.match(/\[[\s\S]*\]/);
-        rawFindings = match ? JSON.parse(match[0]) : [];
-      }
-
-      // Filter out low confidence or suspicious AI hallucinations
-      return rawFindings
-        .filter((f: any) => f.confidence > 0.8)
-        .map((f: any) => {
-          const val = String(f.secretValue || "");
-          const redacted = val.length > 12 
-              ? `${val.substring(0, 4)}••••${val.substring(val.length - 4)}` 
-              : "••••••••";
-
-          return {
-              ...f,
-              id: Math.random().toString(36).substr(2, 9),
-              file: fileName,
-              redactedSecret: redacted
-          };
-        });
-    } catch (error: any) {
-
-      console.error("Gemini Audit Error:", error);
-      if (error.message?.includes("SAFETY")) {
-        // Safety triggers usually mean we found something very sensitive that the AI won't repeat
-        return [{
-          id: 'safety-trigger',
-          file: fileName,
-          line: 0,
-          type: "Confirmed Sensitive Data (Filtered)",
-          snippet: "Confidential data triggered safety block",
-          severity: Severity.CRITICAL,
-          explanation: "The AI detected a real, highly sensitive production credential and blocked the output for safety. This is a 100% positive match.",
-          suggestion: "Rotate all credentials in this file immediately.",
-          redactedSecret: "REDACTED"
-        }];
-      }
-      throw new Error("AI analysis engine timed out or was blocked.");
+        return {
+            ...f,
+            id: Math.random().toString(36).substr(2, 9),
+            file: fileName,
+            redactedSecret: redacted
+        };
+      });
+    } catch (error) {
+      console.error("Gemini analysis error:", error);
+      return [];
     }
   }
 }
